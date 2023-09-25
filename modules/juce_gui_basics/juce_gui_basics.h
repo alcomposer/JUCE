@@ -360,6 +360,8 @@ namespace juce
    #include <X11/Xcursor/Xcursor.h>
   #endif
 
+  #include <X11/extensions/XInput2.h>
+
   #undef SIZEOF
   #undef KeyPress
 

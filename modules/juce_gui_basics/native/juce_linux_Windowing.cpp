@@ -716,11 +716,17 @@ Desktop::DisplayOrientation Desktop::getCurrentOrientation() const  { return upr
 void Desktop::allowedOrientationsChanged()                          {}
 
 //==============================================================================
+
 bool MouseInputSource::SourceList::addSource()
 {
-    if (sources.isEmpty())
+    auto numSources = sources.size();
+
+    std::cout << "add source: " << numSources << std::endl;
+
+    if (numSources == 0 || XWindowSystem::getInstance()->xi.opcode != 0)
     {
-        addSource (0, MouseInputSource::InputSourceType::mouse);
+        addSource (numSources, numSources == 0 ? MouseInputSource::InputSourceType::mouse
+                                               : MouseInputSource::InputSourceType::touch);
         return true;
     }
 
@@ -729,7 +735,8 @@ bool MouseInputSource::SourceList::addSource()
 
 bool MouseInputSource::SourceList::canUseTouch()
 {
-    return false;
+    std::cout << "checking for touch" << std::endl;
+    return XWindowSystem::getInstance()->xi.opcode != 0;
 }
 
 Point<float> MouseInputSource::getCurrentRawMousePosition()

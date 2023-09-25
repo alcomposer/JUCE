@@ -198,6 +198,8 @@ public:
     bool isFocused (::Window) const;
     bool grabFocus (::Window) const;
 
+    bool checkForXInputExtension();
+
     bool canUseSemiTransparentWindows() const;
     bool canUseARGBImages() const;
     bool isDarkModeActive() const;
@@ -248,6 +250,29 @@ public:
     void handleWindowMessage (LinuxComponentPeer*, XEvent&) const;
     bool isParentWindowOf (::Window, ::Window possibleChild) const;
 
+    //=============================== touch ========================================
+
+    struct {
+        int opcode = 0;
+        Array<int> touch_devices;
+        // XIEventMask all_event_mask; // unused at this point
+        bool activeTouchs = false;
+        Point<int> filteredPos;
+
+        void setFilteredPos(Point<int> positionToFilter)
+        {
+            activeTouchs = true;
+            filteredPos = positionToFilter;
+        }
+
+        bool hasActiveTouchs()
+        {
+            auto ret = activeTouchs;
+            activeTouchs = false;
+            return ret;
+        }
+    } xi;
+
     //==============================================================================
     JUCE_DECLARE_SINGLETON (XWindowSystem, false)
 
@@ -292,6 +317,7 @@ private:
     void initialisePointerMap();
     void deleteIconPixmaps (::Window) const;
     void updateModifierMappings() const;
+    void initialiseTouchInput();
 
     long getUserTime (::Window) const;
 
@@ -324,6 +350,7 @@ private:
     ::Window findTopLevelWindowOf (::Window) const;
 
     static void windowMessageReceive (XEvent&);
+    bool touchMessageRecieve(XEvent&);
 
     //==============================================================================
     bool xIsAvailable = false;

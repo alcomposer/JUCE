@@ -1609,6 +1609,24 @@ static int getAllEventsMask (bool ignoresMouseClicks)
     unsigned long info[2] = { 0, 1 };
     xchangeProperty (windowH, atoms.XembedInfo, atoms.XembedInfo, 32, (unsigned char*) info, 2);
 
+    // =================== setup XI2 for window ===================
+
+    if (xi.touch_devices.size()) {
+
+        XIEventMask evmask;
+        unsigned char mask[XIMaskLen(XI_LASTEVENT)] = { 0 };
+
+        evmask.deviceid = XIAllDevices; // ask for all devices, but filter them in the event callback
+        evmask.mask_len = sizeof(mask);
+        evmask.mask = mask;
+
+        XISetMask(evmask.mask, XI_TouchBegin);
+        XISetMask(evmask.mask, XI_TouchUpdate);
+        XISetMask(evmask.mask, XI_TouchEnd);
+        //XISetMask(evmask.mask, XI_TouchOwnership);
+
+        X11Symbols::getInstance()->xiSelectEvents(display, windowH, &evmask, 1);
+    }
     return windowH;
 }
 
@@ -3114,6 +3132,70 @@ void XWindowSystem::initialiseXSettings()
                                                  StructureNotifyMask | PropertyChangeMask);
 }
 
+bool XWindowSystem::checkForXInputExtension()
+{
+    // by quering the extension, we also let X11 know we don't want X11 to repeat the touch as mouse input
+    // so this is very important, but xQueryExtension at first glance doesn't communicate how much it is actually doing
+    int event, error;
+    if (X11Symbols::getInstance()->xQueryExtension(display, "XInputExtension", &xi.opcode, &event, &error))
+    {
+        // multi-touch is only suported from 2.2 onwards
+        int major_version = 2;
+        int minor_version = 2;
+
+        if (X11Symbols::getInstance()->xiQueryVersion(display, &major_version, &minor_version) == Success) {
+            std::cout << "XI2 is supported, opcode: " << xi.opcode << " XI2 Version: " << major_version << ", " << minor_version << std::endl;
+            return true;
+        } else {
+            xi.opcode = 0;
+            std::cout << "XI2 is not supported" << std::endl;;
+        }
+    }
+    return false;
+}
+
+void XWindowSystem::initialiseTouchInput()
+{
+    if (! checkForXInputExtension())
+        return;
+
+    xi.touch_devices.clear();
+
+    int dev_count;
+    XITouchClassInfo *classInfo;
+    XIDeviceInfo *info = X11Symbols::getInstance()->xiQueryDevice(display, XIAllDevices, &dev_count);
+
+    for (int i = 0; i < dev_count; i++) {
+        XIDeviceInfo *dev = &info[i];
+
+        if (!dev->enabled) {
+            continue;
+        }
+
+        if ( !(dev->use == XISlavePointer || dev->use == XIFloatingSlave)) {
+            continue;
+        }
+
+        bool direct_touch = false;
+
+        for (int j = 0; j < dev->num_classes; j++) {
+            classInfo = (XITouchClassInfo*)(dev->classes[j]);
+
+            if (classInfo->type == XITouchClass && ((XITouchClassInfo *)dev->classes[j])->mode == XIDirectTouch)
+                direct_touch = true;
+        }
+        if (direct_touch) {
+            xi.touch_devices.add(dev->deviceid);
+            auto mode = classInfo->mode == XIDirectTouch ? "DIRECT" : "DEPENDENT";
+            std::cout << "XInput: Using touch device: " << dev->deviceid << " : " << dev->name << " " << mode << " touch " << classInfo->num_touches << " touchs" << std::endl;
+        }
+    }
+    X11Symbols::getInstance()->xiFreeDeviceInfo(info);
+
+    if (xi.touch_devices.size() == 0)
+        std::cout << "XInput: No touch devices found" << std::endl;
+}
+
 XWindowSystem::DisplayVisuals::DisplayVisuals (::Display* xDisplay)
 {
     auto findVisualWithDepthOrNull = [&] (int desiredDepth) -> Visual*
@@ -3205,6 +3287,7 @@ bool XWindowSystem::initialiseXDisplay()
     initialisePointerMap();
     updateModifierMappings();
     initialiseXSettings();
+    initialiseTouchInput();
 
    #if JUCE_USE_XSHM
     if (XSHMHelpers::isShmAvailable (display))
@@ -3220,33 +3303,41 @@ bool XWindowSystem::initialiseXDisplay()
     }
 
     // Setup input event handler
-    LinuxEventLoop::registerFdCallback (X11Symbols::getInstance()->xConnectionNumber (display),
-                                        [this] (int)
-                                        {
-                                            do
-                                            {
-                                                XEvent evt;
+    LinuxEventLoop::registerFdCallback(X11Symbols::getInstance()->xConnectionNumber(display),
+        [this](int) {
+            do {
+                XEvent evt;
 
-                                                {
-                                                    XWindowSystemUtilities::ScopedXLock xLock;
+                {
+                    XWindowSystemUtilities::ScopedXLock xLock;
 
-                                                    if (! X11Symbols::getInstance()->xPending (display))
-                                                        return;
+                    if (!X11Symbols::getInstance()->xPending(display))
+                        return;
 
-                                                    X11Symbols::getInstance()->xNextEvent (display, &evt);
-                                                }
+                    X11Symbols::getInstance()->xNextEvent(display, &evt);
+                }
 
-                                                if (evt.type == SelectionRequest && evt.xany.window == juce_messageWindowHandle)
-                                                {
-                                                    ClipboardHelpers::handleSelection (evt.xselectionrequest);
-                                                }
-                                                else if (evt.xany.window != juce_messageWindowHandle)
-                                                {
-                                                    windowMessageReceive (evt);
-                                                }
-
-                                            } while (display != nullptr);
-                                        });
+                if (evt.type == SelectionRequest && evt.xany.window == juce_messageWindowHandle)
+                {
+                    ClipboardHelpers::handleSelection(evt.xselectionrequest);
+                }
+                else if (evt.xany.window != juce_messageWindowHandle) 
+                {
+                    auto wasTouchMessage = touchMessageRecieve(evt);
+                    if (evt.xany.type == MotionNotify && xi.hasActiveTouchs())
+                    {
+                        auto pos = Point<int>(evt.xmotion.x_root, evt.xmotion.y_root);
+                        if (pos.getDistanceSquaredFrom(xi.filteredPos) < 2.0f)
+                        {
+                            std::cout << "Filtered spurious mouse motion event ===================================== " << std::endl;
+                            continue;
+                        }
+                    }
+                    if (!wasTouchMessage)
+                        windowMessageReceive(evt);
+                }
+            } while (display != nullptr);
+        });
 
     return true;
 }
@@ -3315,6 +3406,37 @@ static int64 getEventTime (const EventType& t)
 
 void XWindowSystem::handleWindowMessage (LinuxComponentPeer* peer, XEvent& event) const
 {
+/*
+    // ============================= DEBUGGING =============================
+    std::cout << "handle window message: " << std::flush;
+    switch (event.xany.type) {
+        case KeyPressEventType:  std::cout << " KeyPressEventType" << std::endl;   break;
+        case KeyRelease:         std::cout << " KeyRelease" << std::endl;          break;
+        case ButtonPress:        std::cout << " ButtonPress" << std::endl;         break;
+        case ButtonRelease:      std::cout << " ButtonRelease" << std::endl;       break;
+        case MotionNotify:       std::cout << " MotionNotify" << std::endl;        break;
+        case EnterNotify:        std::cout << " EnterNotify" << std::endl;         break;
+        case LeaveNotify:        std::cout << " LeaveNotify" << std::endl;         break;
+        case FocusIn:            std::cout << " FocusIn" << std::endl;             break;
+        case FocusOut:           std::cout << " FocusOut" << std::endl;            break;
+        case Expose:             std::cout << " Expose" << std::endl;              break;
+        case MappingNotify:      std::cout << " MappingNotify" << std::endl;       break;
+        case ClientMessage:      std::cout << " ClientMessage" << std::endl;       break;
+        case SelectionNotify:    std::cout << " SelectionNotify" << std::endl;     break;
+        case ConfigureNotify:    std::cout << " ConfigureNotify" << std::endl;     break;
+        case GravityNotify:      std::cout << " GravityNotify" << std::endl;       break;
+        case SelectionClear:     std::cout << " SelectionClear" << std::endl;      break;
+        case SelectionRequest:   std::cout << " SelectionRequest" << std::endl;    break;
+        case PropertyNotify:     std::cout << " PropertyNotify" << std::endl;      break;
+        case CirculateNotify:    std::cout << " CirculateNotify" << std::endl;     break;
+        case CreateNotify:       std::cout << " CreateNotify" << std::endl;        break;
+        case DestroyNotify:      std::cout << " DestroyNotify" << std::endl;       break;
+        case UnmapNotify:        std::cout << " UnmapNotify" << std::endl;         break;
+        case MapNotify:          std::cout << " MapNotify" << std::endl;           break;
+        default:                 std::cout << " Unknown Event Type: " << event.xany.type << std::endl; break;
+    }
+    // ============================= DEBUGGING =============================
+*/
     switch (event.xany.type)
     {
         case KeyPressEventType:     handleKeyPressEvent        (peer, event.xkey);                     break;
@@ -3594,6 +3716,13 @@ void XWindowSystem::handleButtonReleaseEvent (LinuxComponentPeer* peer, const XB
 
 void XWindowSystem::handleMotionNotifyEvent (LinuxComponentPeer* peer, const XPointerMovedEvent& movedEvent) const
 {
+    // X11 can (and will) send a motion event just after toughBegin, here we check the motion event is close to where the last touch event was registered
+    //auto pos = Point<int>(movedEvent.x_root, movedEvent.y_root);
+    //if (!xi.filteredPos.isOrigin() && pos.getDistanceSquaredFrom(xi.filteredPos) < 2.0f) {
+    //    xi.filteredPos = Point<int>();
+    //    std::cout << "Filtered spurious mouse motion event ===================================== " << std::endl;
+    //    return;
+    //}
     updateKeyModifiers ((int) movedEvent.state);
     Keys::refreshStaleMouseKeys();
 
@@ -3881,13 +4010,132 @@ void XWindowSystem::dismissBlockingModals (LinuxComponentPeer* peer, const XConf
         dismissBlockingModals (peer);
 }
 
-void XWindowSystem::windowMessageReceive (XEvent& event)
+bool XWindowSystem::touchMessageRecieve(XEvent& ev)
 {
-    if (event.xany.window != None)
-    {
-       #if JUCE_X11_SUPPORTS_XEMBED
-        if (! juce_handleXEmbedEvent (nullptr, &event))
-       #endif
+    auto isCookieEvent = false;
+    if (X11Symbols::getInstance()->xGetEventData(display, &ev.xcookie)) {
+        isCookieEvent = true;
+        if (ev.xcookie.type == GenericEvent && ev.xcookie.extension == xi.opcode) {
+
+            auto getLogicalTouchPos = [](XIDeviceEvent* event, double scaleFactor) {
+                return Point<float>(event->event_x, event->event_y) / scaleFactor;
+            };
+
+            static MultiTouchMapper<int> currentTouches;
+
+            XGenericEventCookie* xCookie = &ev.xcookie;
+            XIDeviceEvent* event = reinterpret_cast<XIDeviceEvent*>(xCookie->data);
+
+            // filter touch from devices that we are not interested in
+            // X11 will make 2 devices for each touch input: Master & Slave
+            // We are listening to the slave device - otherwise we will get two touch events per touch!
+            // We also need X11 to think we are interested in all devices for XI2, otherwise it will
+            // generate a synthetic mousedown
+            if (!xi.touch_devices.contains(event->deviceid)) {
+                goto skip;
+            }
+
+            if (auto* peer = dynamic_cast<LinuxComponentPeer*>(getPeerFor(event->event))) {
+                auto eventID = event->detail;
+                auto const touchIndex = currentTouches.getIndexOfTouch(peer, eventID);
+                auto modsToSend = ModifierKeys::currentModifiers;
+
+                auto doTouch = [this, peer, getLogicalTouchPos, eventID, event, touchIndex](ModifierKeys mods, bool touchEnd = false) {
+                    auto pos = touchEnd ? MouseInputSource::offscreenMousePos : getLogicalTouchPos(event, peer->getPlatformScaleFactor());
+                    peer->handleMouseEvent(MouseInputSource::InputSourceType::touch,
+                        pos,
+                        mods,
+                        MouseInputSource::defaultPressure,
+                        MouseInputSource::defaultOrientation,
+                        getEventTime(*event),
+                        {},
+                        touchIndex);
+                };
+
+                switch (xCookie->evtype) {
+                case XI_TouchBegin:
+                {
+                    ModifierKeys::currentModifiers = ModifierKeys::currentModifiers.withoutMouseButtons().withFlags(ModifierKeys::leftButtonModifier);
+                    modsToSend = ModifierKeys::currentModifiers;
+                    peer->toFront(true);
+
+                    auto& dragState = dragAndDropStateMap[peer];
+                    if (dragState.isDragging())
+                        dragState.handleExternalDragMotionNotify();
+
+                    doTouch(modsToSend.withoutMouseButtons());
+
+                    if (! peer->isValidPeer(peer)) // (in case this component was deleted by the event)
+                        goto skip;
+
+                    doTouch(modsToSend);
+                    xi.setFilteredPos(Point<int>(event->root_x, event->root_y));
+                    std::cout << "touch begin at: " << event->root_x << " : " << event->root_y << " finger: " << touchIndex << std::endl;
+                }
+                break;
+                case XI_TouchUpdate:
+                {
+                    modsToSend = ModifierKeys::currentModifiers.withoutMouseButtons().withFlags(ModifierKeys::leftButtonModifier);
+
+                    auto& dragState = dragAndDropStateMap[peer];
+                    if (dragState.isDragging())
+                        dragState.handleExternalDragMotionNotify();
+
+                    if (! peer->isValidPeer(peer))
+                        goto skip;
+
+                    doTouch(modsToSend);
+                    std::cout << "touch update at: " << event->root_x << " : " << event->root_y << " finger: " << touchIndex << std::endl;
+                }
+                break;
+                case XI_TouchEnd:
+                {
+                    if (peer->getParentWindow() != 0)
+                        peer->updateWindowBounds();
+
+                    modsToSend = modsToSend.withoutMouseButtons();
+                    ModifierKeys::currentModifiers = modsToSend;
+                    currentTouches.clearTouch(touchIndex);
+                    auto isCancel = false;
+                    if (!currentTouches.areAnyTouchesActive())
+                        isCancel = true;
+
+                    std::cout << "touch end at: " << event->root_x << " : " << event->root_y << " finger: " << touchIndex << std::endl;
+
+                    auto& dragState = dragAndDropStateMap[peer];
+                    if (dragState.isDragging())
+                        dragState.handleExternalDragButtonReleaseEvent();
+
+                    doTouch(modsToSend);
+
+                    if (! peer->isValidPeer(peer))
+                        goto skip;
+
+                    doTouch(ModifierKeys::currentModifiers.withoutMouseButtons(), true);
+
+                    if (isCancel) {
+                        currentTouches.clear();
+                        ModifierKeys::currentModifiers = ModifierKeys::currentModifiers.withoutMouseButtons();
+                    }
+                }
+                break;
+                default:
+                    break;
+                }
+            }
+        }
+    }
+    skip:
+    X11Symbols::getInstance()->xFreeEventData(display, &ev.xcookie);
+    return isCookieEvent;
+}
+
+void XWindowSystem::windowMessageReceive(XEvent & event)
+{
+    if (event.xany.window != None) {
+        #if JUCE_X11_SUPPORTS_XEMBED
+        if (!juce_handleXEmbedEvent(nullptr, &event))
+        #endif
         {
             auto* instance = XWindowSystem::getInstance();
 
@@ -3904,7 +4152,7 @@ void XWindowSystem::windowMessageReceive (XEvent& event)
                 }
             }
 
-            if (auto* peer = dynamic_cast<LinuxComponentPeer*> (getPeerFor (event.xany.window)))
+            if (auto* peer = dynamic_cast<LinuxComponentPeer*> (getPeerFor(event.xany.window)))
             {
                 XWindowSystem::getInstance()->handleWindowMessage (peer, event);
                 return;
