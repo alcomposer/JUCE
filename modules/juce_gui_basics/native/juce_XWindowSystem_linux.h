@@ -245,6 +245,8 @@ public:
                                  Point<int> mouseDown,
                                  ResizableBorderComponent::Zone zone);
 
+    void stopHostManagedResize(::Window windowH);
+
     static String getWindowScalingFactorSettingName()  { return "Gdk/WindowScalingFactor"; }
     static String getThemeNameSettingName()            { return "Net/ThemeName"; }
 

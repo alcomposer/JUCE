@@ -405,6 +405,11 @@ public:
         XWindowSystem::getInstance()->startHostManagedResize (windowH, mouseDownPosition, zone);
     }
 
+    void stopHostManagedResize()
+    {
+        XWindowSystem::getInstance()->stopHostManagedResize(windowH);
+    }
+
     //==============================================================================
     static bool isActiveApplication;
     bool focused = false;

@@ -23,6 +23,8 @@
   ==============================================================================
 */
 
+static int c = 0;
+
 namespace juce
 {
 
@@ -1727,6 +1729,7 @@ void XWindowSystem::setVisible (::Window windowH, bool shouldBeVisible) const
 
 void XWindowSystem::setBounds (::Window windowH, Rectangle<int> newBounds, bool isFullScreen) const
 {
+    std::cout << c++ << " XWindowSystem::setBounds" << std::endl;
     jassert (windowH != 0);
 
     if (auto* peer = getPeerFor (windowH))
@@ -1793,6 +1796,7 @@ void XWindowSystem::startHostManagedResize (::Window windowH,
                                             Point<int> mouseDown,
                                             ResizableBorderComponent::Zone zone)
 {
+    std::cout << c++ << " XWindowSystem::startHostManagedResize" << std::endl;
     const auto moveResize = XWindowSystemUtilities::Atoms::getIfExists (display, "_NET_WM_MOVERESIZE");
 
     if (moveResize == None)
@@ -1801,6 +1805,11 @@ void XWindowSystem::startHostManagedResize (::Window windowH,
     XWindowSystemUtilities::ScopedXLock xLock;
 
     X11Symbols::getInstance()->xUngrabPointer (display, CurrentTime);
+
+    X11Symbols::getInstance()->xGrabPointer(
+        display, windowH, False, ButtonReleaseMask,
+        GrabModeAsync, GrabModeAsync, None, None, CurrentTime
+    );
 
     const auto root = X11Symbols::getInstance()->xRootWindow (display, X11Symbols::getInstance()->xDefaultScreen (display));
 
@@ -1849,6 +1858,42 @@ void XWindowSystem::startHostManagedResize (::Window windowH,
                                            false,
                                            SubstructureRedirectMask | SubstructureNotifyMask,
                                            unalignedPointerCast<XEvent*> (&clientMsg));
+
+    X11Symbols::getInstance()->xUngrabPointer(display, CurrentTime);
+}
+
+void XWindowSystem::stopHostManagedResize(::Window windowH)
+{
+    std::cout << "stop host managed resize" << std::endl;
+    const auto moveResize = XWindowSystemUtilities::Atoms::getIfExists(display, "_NET_WM_MOVERESIZE");
+
+    if (moveResize == None)
+        return;
+
+    XWindowSystemUtilities::ScopedXLock xLock;
+
+    X11Symbols::getInstance()->xUngrabPointer(display, CurrentTime);
+
+    // Notify the X11 server that the resize operation is complete
+    XClientMessageEvent clientMsg;
+    clientMsg.display = display;
+    clientMsg.window = windowH;
+    clientMsg.type = ClientMessage;
+    clientMsg.format = 32;
+    clientMsg.message_type = moveResize;
+    clientMsg.data.l[0] = 0; // Set the moveResize flags accordingly (0 for termination)
+    clientMsg.data.l[1] = 0;
+    clientMsg.data.l[2] = 0;
+    clientMsg.data.l[3] = 0;
+    clientMsg.data.l[4] = 0;
+
+    const auto root = X11Symbols::getInstance()->xRootWindow(display, X11Symbols::getInstance()->xDefaultScreen(display));
+
+    X11Symbols::getInstance()->xSendEvent(display, root, false, SubstructureRedirectMask | SubstructureNotifyMask, unalignedPointerCast<XEvent*>(&clientMsg));
+
+    // Perform any necessary cleanup, such as releasing resources
+    // You may need to update any internal state related to the resize operation
+    // (e.g., tracking the resize state, freeing allocated resources, etc.)
 }
 
 void XWindowSystem::updateConstraints (::Window windowH) const

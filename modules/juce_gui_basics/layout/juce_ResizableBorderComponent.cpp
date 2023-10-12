@@ -141,6 +141,13 @@ void ResizableBorderComponent::mouseDrag (const MouseEvent& e)
         return;
     }
 
+    std::cout << "mouse dragging" << std::endl;
+
+    if (!e.mods.isAnyMouseButtonDown()) {
+        std::cout << "no mouse buttons down" << std::endl;
+        return;
+    }
+
     auto newBounds = mouseZone.resizeRectangleBy (originalBounds, e.getOffsetFromDragStart());
 
     if (constrainer != nullptr)
@@ -162,6 +169,10 @@ void ResizableBorderComponent::mouseDrag (const MouseEvent& e)
 
 void ResizableBorderComponent::mouseUp (const MouseEvent&)
 {
+    if (auto* peer = component->getPeer())
+        if (&peer->getComponent() == component)
+            peer->stopHostManagedResize ();
+
     if (constrainer != nullptr)
         constrainer->resizeEnd();
 }

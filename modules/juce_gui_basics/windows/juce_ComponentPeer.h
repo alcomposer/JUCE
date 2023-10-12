@@ -268,6 +268,8 @@ public:
     virtual void startHostManagedResize ([[maybe_unused]] Point<int> mouseDownPosition,
                                          [[maybe_unused]] ResizableBorderComponent::Zone zone) {}
 
+    virtual void stopHostManagedResize() {}
+
     /** Returns the current constrainer, if one has been set. */
     ComponentBoundsConstrainer* getConstrainer() const noexcept             { return constrainer; }
 
