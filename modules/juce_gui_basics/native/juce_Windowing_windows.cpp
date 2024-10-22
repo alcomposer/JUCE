@@ -23,6 +23,13 @@
   ==============================================================================
 */
 
+#define TOPEXTENDWIDTH 38
+#define BOTTOMEXTENDWIDTH 8
+#define LEFTEXTENDWIDTH 8
+#define RIGHTEXTENDWIDTH 8
+
+#include <dwmapi.h>
+
 namespace juce
 {
 
@@ -3658,6 +3665,10 @@ private:
 
     void initialiseSysMenu (HMENU menu) const
     {
+        //EnableMenuItem( menu, SC_MAXIMIZE, MF_BYCOMMAND | MF_ENABLED);
+        //EnableMenuItem( menu, SC_MINIMIZE, MF_BYCOMMAND | MF_ENABLED);
+        //EnableMenuItem( menu, SC_CLOSE, MF_BYCOMMAND | MF_ENABLED);
+
         if (! hasTitleBar())
         {
             if (isFullScreen())
@@ -3702,18 +3713,24 @@ private:
 public:
     static LRESULT CALLBACK windowProc (HWND h, UINT message, WPARAM wParam, LPARAM lParam)
     {
+        bool fCallDWP = true;
+        BOOL fDwmEnabled = FALSE;
+        LRESULT lRet = 0;
+        HRESULT hr = S_OK;
+
         // Ensure that non-client areas are scaled for per-monitor DPI awareness v1 - can't
         // do this in peerWindowProc as we have no window at this point
         if (message == WM_NCCREATE)
             NullCheckedInvocation::invoke (enableNonClientDPIScaling, h);
 
-        if (auto* peer = getOwnerOfWindow (h))
-        {
+        if (auto* peer = getOwnerOfWindow (h)) {
             jassert (isValidPeer (peer));
-            return peer->peerWindowProc (h, message, wParam, lParam);
+            lRet = peer->peerWindowProc (h, message, wParam, lParam, &fCallDWP);
         }
-
-        return DefWindowProcW (h, message, wParam, lParam);
+        if (fCallDWP) {
+            lRet = DefWindowProcW(h, message, wParam, lParam);
+        }
+        return lRet;
     }
 
 private:
@@ -3753,85 +3770,208 @@ private:
         return globalToLocal (convertPhysicalScreenPointToLogical (pointFromPOINT (getPOINTFromLParam ((LPARAM) GetMessagePos())), hwnd).toFloat());
     }
 
-    LRESULT peerWindowProc (HWND h, UINT message, WPARAM wParam, LPARAM lParam)
+        // Hit test the frame for resizing and moving.
+        LRESULT HitTestNCA(HWND hWnd, WPARAM wParam, LPARAM lParam)
+        {
+            // Opt out if there is a button underneath the titlebar area
+            for (int i = 0; i < juce::TopLevelWindow::getNumTopLevelWindows(); ++i)
+            {
+                juce::Component* topLevelComponent = juce::TopLevelWindow::getTopLevelWindow(i);
+                if (topLevelComponent != nullptr)
+                {
+                    juce::ComponentPeer* peer = topLevelComponent->getPeer();
+                    if (peer != nullptr && peer->getNativeHandle() == hWnd)
+                    {
+                        // Found the JUCE component corresponding to the HWND
+                        auto point = getCurrentMousePos();
+                        if (auto button = dynamic_cast<TextButton*>(peer->getComponent().getComponentAt(point.x,  point.y))) {
+                            return 100;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Get the point coordinates for the hit test.
+            POINT ptMouse = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+
+            // Get the window rectangle.
+            RECT rcWindow;
+            GetWindowRect(hWnd, &rcWindow);
+
+            // Get the frame rectangle, adjusted for the style without a caption.
+            RECT rcFrame = { 0 };
+            AdjustWindowRectEx(&rcFrame, WS_OVERLAPPEDWINDOW & ~WS_CAPTION, FALSE, NULL);
+
+            // Determine if the hit test is for resizing. Default middle (1,1).
+            USHORT uRow = 1;
+            USHORT uCol = 1;
+            bool fOnResizeBorder = false;
+
+            // Determine if the point is at the top or bottom of the window.
+            if (ptMouse.y >= rcWindow.top && ptMouse.y < rcWindow.top + TOPEXTENDWIDTH)
+            {
+                fOnResizeBorder = (ptMouse.y < (rcWindow.top - rcFrame.top));
+                uRow = 0;
+            }
+            else if (ptMouse.y < rcWindow.bottom && ptMouse.y >= rcWindow.bottom - BOTTOMEXTENDWIDTH)
+            {
+                uRow = 2;
+            }
+
+            // Determine if the point is at the left or right of the window.
+            if (ptMouse.x >= rcWindow.left && ptMouse.x < rcWindow.left + LEFTEXTENDWIDTH)
+            {
+                uCol = 0; // left side
+            }
+            else if (ptMouse.x < rcWindow.right && ptMouse.x >= rcWindow.right - RIGHTEXTENDWIDTH)
+            {
+                uCol = 2; // right side
+            }
+
+            // Hit test (HTTOPLEFT, ... HTBOTTOMRIGHT)
+            LRESULT hitTests[3][3] =
+                    {
+                            { HTTOPLEFT,    fOnResizeBorder ? HTTOP : HTCAPTION,    HTTOPRIGHT },
+                            { HTLEFT,       HTNOWHERE,     HTRIGHT },
+                            { HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT },
+                    };
+
+            return hitTests[uRow][uCol];
+        }
+
+    LRESULT peerWindowProc (HWND h, UINT message, WPARAM wParam, LPARAM lParam, bool* pfCallDWP)
     {
+        LRESULT lRet = 0;
+        HRESULT hr = S_OK;
+        bool fCallDWP = true; // Pass on to DefWindowProc?
+
+        fCallDWP = !DwmDefWindowProc(h, message, wParam, lParam, &lRet);
+
         switch (message)
         {
             //==============================================================================
-            case WM_NCHITTEST:
-                if ((styleFlags & windowIgnoresMouseClicks) != 0)
+            case WM_NCHITTEST:{
+                if ((styleFlags & windowIgnoresMouseClicks) != 0) {
                     return HTTRANSPARENT;
+                }
 
                 if (! hasTitleBar())
                     return HTCLIENT;
+                else {
+                    if (lRet == 0){
+                        lRet = HitTestNCA(h, wParam, lParam);
 
-                break;
-
+                        if (lRet == 100) {
+                            fCallDWP = true;
+                        }
+                        else if (lRet != HTNOWHERE) {
+                            fCallDWP = false;
+                        }
+                    }
+                }
+            }
+            break;
             //==============================================================================
             case WM_PAINT:
                 handlePaintMessage();
-                return 0;
+                fCallDWP = false;
+                lRet = 0;
 
+                break;
             case WM_NCPAINT:
                 handlePaintMessage(); // this must be done, even with native titlebars, or there are rendering artifacts.
 
-                if (hasTitleBar())
-                    break; // let the DefWindowProc handle drawing the frame.
+                if (hasTitleBar()) {
+                    fCallDWP = true;
+                    lRet = 1;
+                }
+                fCallDWP = false;
+                lRet = 0;
 
-                return 0;
-
+                break;
             case WM_ERASEBKGND:
             case WM_NCCALCSIZE:
-                if (hasTitleBar())
-                    break;
+                if (hasTitleBar() && wParam == TRUE) {
+                    // Calculate new NCCALCSIZE_PARAMS based on custom NCA inset.
+                    NCCALCSIZE_PARAMS *pncsp = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
 
-                return 1;
+                    pncsp->rgrc[0].left   = pncsp->rgrc[0].left   + 0;
+                    pncsp->rgrc[0].top    = pncsp->rgrc[0].top    + 0;
+                    pncsp->rgrc[0].right  = pncsp->rgrc[0].right  - 0;
+                    pncsp->rgrc[0].bottom = pncsp->rgrc[0].bottom - 0;
 
+                    lRet = 0;
+                    // No need to pass the message on to the DefWindowProc.
+                    fCallDWP = false;
+                }
+            break;
             //==============================================================================
             case WM_POINTERUPDATE:
                 if (handlePointerInput (wParam, lParam, false, false))
                     return 0;
                 break;
-
             case WM_POINTERDOWN:
                 if (handlePointerInput (wParam, lParam, true, false))
                     return 0;
                 break;
-
             case WM_POINTERUP:
                 if (handlePointerInput (wParam, lParam, false, true))
                     return 0;
                 break;
-
             //==============================================================================
-            case WM_MOUSEMOVE:          doMouseMove (getPointFromLocalLParam (lParam), false); return 0;
-
+            case WM_MOUSEMOVE:
+                doMouseMove (getPointFromLocalLParam (lParam), false);
+                fCallDWP = false;
+                lRet = 0;
+                break;
             case WM_POINTERLEAVE:
-            case WM_MOUSELEAVE:         doMouseExit(); return 0;
-
+            case WM_MOUSELEAVE:
+                doMouseExit();
+                fCallDWP = false;
+                lRet = 0;
+                break;
             case WM_LBUTTONDOWN:
             case WM_MBUTTONDOWN:
-            case WM_RBUTTONDOWN:        doMouseDown (getPointFromLocalLParam (lParam), wParam); return 0;
-
+            case WM_RBUTTONDOWN:
+                doMouseDown (getPointFromLocalLParam (lParam), wParam);
+                fCallDWP = true;
+                lRet = 0;
+                break;
             case WM_LBUTTONUP:
             case WM_MBUTTONUP:
-            case WM_RBUTTONUP:          doMouseUp (getPointFromLocalLParam (lParam), wParam); return 0;
-
+            case WM_RBUTTONUP:
+                doMouseUp (getPointFromLocalLParam (lParam), wParam);
+                fCallDWP = true;
+                lRet = 0;
+                break;
             case WM_POINTERWHEEL:
-            case 0x020A: /* WM_MOUSEWHEEL */   doMouseWheel (wParam, true);  return 0;
-
+            case 0x020A: /* WM_MOUSEWHEEL */
+                doMouseWheel (wParam, true);
+                fCallDWP = false;
+                lRet = 0;
+                break;
             case WM_POINTERHWHEEL:
-            case 0x020E: /* WM_MOUSEHWHEEL */  doMouseWheel (wParam, false); return 0;
-
-            case WM_CAPTURECHANGED:     doCaptureChanged(); return 0;
-
+            case 0x020E: /* WM_MOUSEHWHEEL */
+                doMouseWheel (wParam, false);
+                fCallDWP = false;
+                lRet = 0;
+                break;
+            case WM_CAPTURECHANGED:
+                doCaptureChanged();
+                fCallDWP = false;
+                lRet = 0;
+                break;
             case WM_NCPOINTERUPDATE:
             case WM_NCMOUSEMOVE:
-                if (hasTitleBar())
+                if (hasTitleBar()) {
+                    fCallDWP = true;
+                    lRet = 1;
                     break;
-
-                return 0;
-
+                }
+                fCallDWP = false;
+                lRet = 0;
+                break;
             case WM_TOUCH:
                 if (getTouchInputInfo != nullptr)
                     return doTouchEvent ((int) wParam, (HTOUCHINPUT) lParam);
@@ -3845,10 +3985,18 @@ private:
                 break;
 
             //==============================================================================
-            case WM_SIZING:                  return handleSizeConstraining (*(RECT*) lParam, wParam);
-            case WM_WINDOWPOSCHANGING:       return handlePositionChanging (*(WINDOWPOS*) lParam);
-            case 0x2e0: /* WM_DPICHANGED */  return handleDPIChanging ((int) HIWORD (wParam), *(RECT*) lParam);
-
+            case WM_SIZING:
+                fCallDWP = false;
+                lRet = handleSizeConstraining (*(RECT*) lParam, wParam);
+                break;
+            case WM_WINDOWPOSCHANGING:
+                fCallDWP = false;
+                lRet = handlePositionChanging (*(WINDOWPOS*) lParam);
+                break;
+            case 0x2e0: /* WM_DPICHANGED */
+                fCallDWP = false;
+                lRet = handleDPIChanging ((int) HIWORD (wParam), *(RECT*) lParam);
+                break;
             case WM_WINDOWPOSCHANGED:
             {
                 const WINDOWPOS& wPos = *reinterpret_cast<WINDOWPOS*> (lParam);
@@ -3856,8 +4004,10 @@ private:
                 if ((wPos.flags & SWP_NOMOVE) != 0 && (wPos.flags & SWP_NOSIZE) != 0)
                     startTimer (100);
                 else
-                    if (handlePositionChanged())
-                        return 0;
+                    if (handlePositionChanged()) {
+                        fCallDWP = false;
+                        break;
+                    }
             }
             break;
 
@@ -3930,7 +4080,6 @@ private:
                             sendInputAttemptWhenModalMessage();
 
                 break;
-
             case WM_ACTIVATEAPP:
                 // Windows does weird things to process priority when you swap apps,
                 // so this forces an update when the app is brought to the front
@@ -3941,13 +4090,34 @@ private:
 
                 detail::TopLevelWindowManager::checkCurrentlyFocusedTopLevelWindow();
                 modifiersAtLastCallback = -1;
-                return 0;
-
+                fCallDWP = false;
+                lRet = 1;
+                break;
             case WM_ACTIVATE:
+                {
+                    // Extend the frame into the client area.
+                    MARGINS margins = {0, 0, 1, 0}; // or just {0} ??
+
+                    //margins.cyTopHeight = TOPEXTENDWIDTH;
+                    //margins.cyBottomHeight = BOTTOMEXTENDWIDTH;
+                    //margins.cxLeftWidth = LEFTEXTENDWIDTH;
+                    //margins.cxRightWidth = RIGHTEXTENDWIDTH;
+
+                    hr = DwmExtendFrameIntoClientArea(h, &margins);
+
+                    if (!SUCCEEDED(hr))
+                    {
+                    }
+
+                    fCallDWP = true;
+                    lRet = 0;
+                }
+
                 if (LOWORD (wParam) == WA_ACTIVE || LOWORD (wParam) == WA_CLICKACTIVE)
                 {
                     handleAppActivation (wParam);
-                    return 0;
+                    fCallDWP = true;
+                    lRet = 0;
                 }
 
                 break;
@@ -3958,12 +4128,14 @@ private:
                 if (wParam == 0 && ! shouldDeactivateTitleBar)
                     wParam = TRUE; // change this and let it get passed to the DefWindowProc.
 
+                fCallDWP = false;
                 break;
-
             case WM_POINTERACTIVATE:
             case WM_MOUSEACTIVATE:
-                if (! component.getMouseClickGrabsKeyboardFocus())
-                    return MA_NOACTIVATE;
+                if (! component.getMouseClickGrabsKeyboardFocus()) {
+                    fCallDWP = false;
+                    lRet = MA_NOACTIVATE;
+                }
 
                 break;
 
@@ -3973,14 +4145,16 @@ private:
                     component.setVisible (true);
                     handleBroughtToFront();
                 }
-
+                fCallDWP = true;
+                lRet = 0;
                 break;
 
             case WM_CLOSE:
                 if (! component.isCurrentlyBlockedByAnotherModalComponent())
                     handleUserClosingWindow();
-
-                return 0;
+                fCallDWP = false;
+                lRet = 1;
+                break;
 
            #if JUCE_REMOVE_COMPONENT_FROM_DESKTOP_ON_WM_DESTROY
             case WM_DESTROY:
@@ -3992,17 +4166,19 @@ private:
                 if (auto* app = JUCEApplicationBase::getInstance())
                 {
                     app->systemRequestedQuit();
+                    fCallDWP = false;
                     return MessageManager::getInstance()->hasStopMessageBeenSent();
                 }
-                return TRUE;
-
+                fCallDWP = true;
+                lRet = 1;
+                break;
             case WM_POWERBROADCAST:
                 handlePowerBroadcast (wParam);
                 break;
-
             case WM_SYNCPAINT:
-                return 0;
-
+                fCallDWP = false;
+                lRet = 0;
+                break;
             case WM_DISPLAYCHANGE:
                 InvalidateRect (h, nullptr, 0);
                 // intentional fall-through...
@@ -4010,11 +4186,12 @@ private:
             case WM_SETTINGCHANGE:  // note the fall-through in the previous case!
                 doSettingChange();
                 break;
-
             case WM_INITMENU:
+                std::cout << "init menu" << std::endl;
                 initialiseSysMenu ((HMENU) wParam);
+                lRet = 0;
+                fCallDWP = true;
                 break;
-
             case WM_SYSCOMMAND:
                 switch (wParam & 0xfff0)
                 {
@@ -4050,16 +4227,17 @@ private:
                 case SC_MAXIMIZE:
                     if (! sendInputAttemptWhenModalMessage())
                         setFullScreen (true);
-
-                    return 0;
-
+                    break;
                 case SC_MINIMIZE:
-                    if (sendInputAttemptWhenModalMessage())
+                    if (sendInputAttemptWhenModalMessage()) {
+                        fCallDWP = false;
                         return 0;
+                    }
 
                     if (! hasTitleBar())
                     {
                         setMinimised (true);
+                        fCallDWP = false;
                         return 0;
                     }
                     break;
@@ -4093,25 +4271,37 @@ private:
             case WM_NCPOINTERDOWN:
             case WM_NCLBUTTONDOWN:
                 handleLeftClickInNCArea (wParam);
+                fCallDWP = true;
                 break;
-
             case WM_NCRBUTTONDOWN:
             case WM_NCMBUTTONDOWN:
                 sendInputAttemptWhenModalMessage();
                 break;
-
             case WM_IME_SETCONTEXT:
                 imeHandler.handleSetContext (h, wParam == TRUE);
                 lParam &= ~(LPARAM) ISC_SHOWUICOMPOSITIONWINDOW;
-                return ImmIsUIMessage (h, message, wParam, lParam);
-
-            case WM_IME_STARTCOMPOSITION:  imeHandler.handleStartComposition (*this); return 0;
-            case WM_IME_ENDCOMPOSITION:    imeHandler.handleEndComposition (*this, h); return 0;
-            case WM_IME_COMPOSITION:       imeHandler.handleComposition (*this, h, lParam); return 0;
-
+                fCallDWP = false;
+                lRet = ImmIsUIMessage (h, message, wParam, lParam);
+                break;
+            case WM_IME_STARTCOMPOSITION:
+                imeHandler.handleStartComposition (*this);
+                fCallDWP = false;
+                lRet = 0;
+                break;
+            case WM_IME_ENDCOMPOSITION:
+                imeHandler.handleEndComposition (*this, h);
+                fCallDWP = false;
+                lRet = 0;
+                break;
+            case WM_IME_COMPOSITION:
+                imeHandler.handleComposition (*this, h, lParam);
+                fCallDWP = false;
+                lRet = 0;
+                break;
             case WM_GETDLGCODE:
-                return DLGC_WANTALLKEYS;
-
+                fCallDWP = false;
+                lRet = DLGC_WANTALLKEYS;
+                break;
             case WM_GETOBJECT:
             {
                 if (static_cast<long> (lParam) == WindowsAccessibility::getUiaRootObjectId())
@@ -4134,7 +4324,8 @@ private:
                 break;
         }
 
-        return DefWindowProcW (h, message, wParam, lParam);
+        *pfCallDWP = fCallDWP;
+        return lRet;
     }
 
     bool sendInputAttemptWhenModalMessage()

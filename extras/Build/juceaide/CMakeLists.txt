@@ -40,11 +40,18 @@ if(JUCE_BUILD_HELPER_TOOLS)
         # deploy to older versions of macOS.
         JUCE_SILENCE_XCODE_15_LINKER_WARNING=1)
 
-    target_link_libraries(juceaide PRIVATE
+    set(libs
         juce::juce_build_tools
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
-        juce::juce_recommended_warning_flags)
+        juce::juce_recommended_warning_flags
+    )
+
+    if(WIN32)
+        list(APPEND libs Dwmapi.lib)
+    endif()
+
+    target_link_libraries(juceaide PRIVATE ${libs})
 
     set_target_properties(juceaide PROPERTIES
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
